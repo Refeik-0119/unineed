@@ -1,0 +1,459 @@
+<?php
+require_once '../config/database.php';
+requireStudent();
+
+// Prevent caching
+header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+header('Pragma: no-cache');
+header('Expires: 0');
+
+// Get current user data
+$user_id = isset($_SESSION['user_id']) ? intval($_SESSION['user_id']) : null;
+if (!$user_id) {
+    // Not logged in properly, redirect to login
+    header('Location: ../index.php');
+    exit();
+}
+
+$query = "SELECT * FROM users WHERE user_id = $user_id";
+$result = mysqli_query($conn, $query);
+$user = mysqli_fetch_assoc($result);
+
+if (!$user) {
+    // User record not found - clear session and redirect to login
+    session_unset();
+    session_destroy();
+    header('Location: ../index.php');
+    exit();
+}
+
+// Handle Profile Update
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_profile'])) {
+    $email = clean($_POST['email']);
+    $phone = clean($_POST['phone']);
+    
+    // Ensure phone only contains digits and trim to 11 characters
+    $phone = preg_replace('/\D+/', '', $phone);
+    if (strlen($phone) > 11) $phone = substr($phone, 0, 11);
+    
+    // Check if email is already in use by another user
+    $check_email = "SELECT * FROM users WHERE email = '$email' AND user_id != $user_id";
+    $check_result = mysqli_query($conn, $check_email);
+    
+    if (mysqli_num_rows($check_result) > 0) {
+        $error = "Email already in use by another student!";
+    } else {
+        $update_query = "UPDATE users SET 
+                        email = '$email',
+                        phone = '$phone'
+                        WHERE user_id = $user_id";
+        
+        if (mysqli_query($conn, $update_query)) {
+            $success = "Profile updated successfully! Changes will be visible in the admin panel.";
+            // Refresh user data
+            $result = mysqli_query($conn, $query);
+            $user = mysqli_fetch_assoc($result);
+            // Redirect to refresh and clear any cache
+            header('Refresh: 1; url=' . $_SERVER['PHP_SELF']);
+        } else {
+            $error = "Failed to update profile: " . mysqli_error($conn);
+        }
+    }
+}
+
+// Handle Password Change
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['change_password'])) {
+    $current_password = $_POST['current_password'] ?? '';
+    $new_password = $_POST['new_password'];
+    $confirm_password = $_POST['confirm_password'];
+    $is_force_change = isset($_SESSION['require_password_change']) || isset($_GET['force_change']);
+    
+    // For forced password change, verify the default password instead of current password
+    if ($is_force_change && password_verify('@Student01', $user['password'])) {
+        // Allow password change without verifying old password on first login
+        $password_verified = true;
+    } elseif (!$is_force_change && password_verify($current_password, $user['password'])) {
+        // Normal password change requires current password
+        $password_verified = true;
+    } else {
+        $password_verified = false;
+    }
+    
+    if ($password_verified) {
+        if ($new_password === $confirm_password) {
+            if (strlen($new_password) >= 6) {
+                $hashed_password = password_hash($new_password, PASSWORD_DEFAULT);
+                $update_query = "UPDATE users SET password = '$hashed_password' WHERE user_id = $user_id";
+                
+                if (mysqli_query($conn, $update_query)) {
+                    // Clear the force password change flag
+                    unset($_SESSION['require_password_change']);
+                    $success = "Password changed successfully! You can now access your account normally.";
+                    // if this was a forced change, redirect to products right away
+                    if ($is_force_change) {
+                        header('Location: products.php');
+                        exit();
+                    }
+                } else {
+                    $error = "Failed to change password.";
+                }
+            } else {
+                $error = "Password must be at least 6 characters long.";
+            }
+        } else {
+            $error = "New passwords do not match.";
+        }
+    } else {
+        $error = $is_force_change ? "Unable to verify your account." : "Current password is incorrect.";
+    }
+}
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Settings - UniNeeds Student</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <link rel="stylesheet" href="../assets/css/style.css">
+    <link rel="stylesheet" href="../assets/css/mobile.css">
+</head>
+<body>
+    <?php include 'includes/sidebar.php'; ?>
+    
+    <?php if (isset($_SESSION['require_password_change']) || isset($_GET['force_change'])): ?>
+    <!-- Force password change modal shown on first login with default password -->
+    <div class="modal fade" id="forceChangeModal" data-bs-backdrop="static" data-bs-keyboard="false" tabindex="-1" aria-labelledby="forceChangeModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="forceChangeModalLabel">Change Your Password</h5>
+                </div>
+                <div class="modal-body">
+                    <p>For security reasons you are required to set a new password before accessing the system.</p>
+                    <p>Please use the fields below to create a secure password.</p>
+                    <form method="POST" id="forceChangeForm">
+                        <div class="mb-3">
+                            <label class="form-label">New Password *</label>
+                            <input type="password" class="form-control" name="new_password" required minlength="6">
+                            <small class="text-muted">Minimum 6 characters</small>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Confirm New Password *</label>
+                            <input type="password" class="form-control" name="confirm_password" required minlength="6">
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="submit" form="forceChangeForm" name="change_password" class="btn btn-warning">
+                        <i class="bi bi-key me-1"></i>Set Password
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <?php endif; ?>
+
+    <div class="main-content">
+        <div class="top-bar">
+            <button class="btn btn-link d-md-none" id="sidebarToggle">
+                <i class="bi bi-list fs-3"></i>
+            </button>
+            <h2>Settings</h2>
+        </div>
+        
+        <div class="content-area">
+
+            <?php if (isset($success)): ?>
+            <div class="alert alert-success alert-dismissible fade show">
+                <i class="bi bi-check-circle me-2"></i><?php echo $success; ?>
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            </div>
+            <?php endif; ?>
+        
+            <?php if (isset($error)): ?>
+            <div class="alert alert-danger alert-dismissible fade show">
+                <i class="bi bi-exclamation-triangle me-2"></i><?php echo $error; ?>
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            </div>
+            <?php endif; ?>
+
+            <?php if (isset($_SESSION['require_password_change']) || isset($_GET['force_change'])): ?>
+                <div class="alert alert-warning">
+                    <i class="bi bi-exclamation-triangle me-2"></i>
+                    <strong>Action Required:</strong> You must change your default password before continuing.
+                </div>
+            <?php endif; ?>
+
+            <div class="row g-4">
+                <!-- Profile Information -->
+                <div class="col-md-6">
+                    <div class="card">
+                        <div class="card-header">
+                            <h5 class="mb-0"><i class="bi bi-person me-2"></i>Profile Information</h5>
+                        </div>
+                        <div class="card-body">
+                            <form method="POST">
+                                <div class="mb-3">
+                                    <label class="form-label">Student ID</label>
+                                    <input type="text" class="form-control" value="<?php echo htmlspecialchars($user['student_id']); ?>" readonly>
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label">Full Name</label>
+                                    <input type="text" class="form-control" value="<?php echo htmlspecialchars($user['full_name']); ?>" readonly>
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label">Email Address</label>
+                                    <input type="email" class="form-control" name="email" value="<?php echo htmlspecialchars($user['email']); ?>" required>
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label">Phone Number</label>
+                                    <input type="text" class="form-control" name="phone" value="<?php echo htmlspecialchars($user['phone']); ?>" placeholder="09XXXXXXXXX" maxlength="11" inputmode="numeric" pattern="\d*" oninput="this.value=this.value.replace(/\D/g,'').slice(0,11)">
+                                    <small class="text-muted">Only digits, maximum 11 characters.</small>
+                                </div>
+                                <button type="submit" name="update_profile" class="btn btn-primary mt-3">
+                                    <i class="bi bi-save me-2"></i>Update Profile
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Change Password -->
+                <div class="col-md-6">
+                    <div class="card">
+                        <div class="card-header">
+                            <h5 class="mb-0"><i class="bi bi-shield-lock me-2"></i><?php echo (isset($_SESSION['require_password_change']) || isset($_GET['force_change'])) ? 'Set Your Password' : 'Change Password'; ?></h5>
+                        </div>
+                        <div class="card-body">
+                            <form method="POST">
+                                <?php if (!(isset($_SESSION['require_password_change']) || isset($_GET['force_change']))): ?>
+                                <div class="mb-3">
+                                    <label class="form-label">Current Password *</label>
+                                    <input type="password" class="form-control" name="current_password" required>
+                                </div>
+                                <?php else: ?>
+                                <div class="alert alert-info">
+                                    <i class="bi bi-info-circle me-2"></i>
+                                    Please set a secure password for your account to complete your registration.
+                                </div>
+                                <?php endif; ?>
+                                <div class="mb-3">
+                                    <label class="form-label">New Password *</label>
+                                    <input type="password" class="form-control" name="new_password" required minlength="6">
+                                    <small class="text-muted">Minimum 6 characters</small>
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label">Confirm New Password *</label>
+                                    <input type="password" class="form-control" name="confirm_password" required minlength="6">
+                                </div>
+                                <button type="submit" name="change_password" class="btn btn-warning mt-3">
+                                    <i class="bi bi-key me-2"></i><?php echo (isset($_SESSION['require_password_change']) || isset($_GET['force_change'])) ? 'Set Password' : 'Change Password'; ?>
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+            </div>
+       
+            
+
+        </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+        <script>
+            document.addEventListener('DOMContentLoaded', function() {
+                <?php if (isset($_SESSION['require_password_change']) || isset($_GET['force_change'])): ?>
+                    var forceModalEl = document.getElementById('forceChangeModal');
+                    if (forceModalEl) {
+                        var forceModal = new bootstrap.Modal(forceModalEl);
+                        forceModal.show();
+                    }
+                <?php endif; ?>
+            });
+        </script>
+        </div>
+
+<style>
+.main-content {
+    min-height: 100vh;
+    margin-left: 250px;
+    background-color: #f5f6f8;
+}
+
+.content-area {
+    padding: 30px;
+}
+
+.top-bar {
+    background-color: white;
+    padding: 20px 30px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+
+.top-bar h2 {
+    color: #2c3345;
+    font-weight: 600;
+    margin: 0;
+}
+
+.page-title {
+    color: #2c3345;
+    font-weight: 600;
+}
+
+.card {
+    border: none;
+    border-radius: 12px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    margin-bottom: 20px;
+    background-color: white;
+}
+
+.card-header {
+    background-color: white;
+    border-bottom: 1px solid #e8e9eb;
+    padding: 20px;
+    border-radius: 12px 12px 0 0;
+}
+
+.card-header h5 {
+    color: #2c3345;
+    font-weight: 600;
+    margin: 0;
+    font-size: 1.1rem;
+}
+
+.card-body {
+    padding: 25px;
+}
+
+.form-label {
+    color: #2c3345;
+    font-weight: 500;
+    margin-bottom: 8px;
+    font-size: 0.95rem;
+}
+
+.form-control {
+    padding: 10px 14px;
+    border: 1px solid #dddfe3;
+    border-radius: 8px;
+    font-size: 0.95rem;
+    transition: all 0.3s ease;
+}
+
+.form-control:focus {
+    border-color: #FF8C00;
+    box-shadow: 0 0 0 3px rgba(255, 140, 0, 0.1);
+}
+
+.form-control:disabled,
+.form-control[readonly] {
+    background-color: #f5f6f8;
+    border-color: #e8e9eb;
+    color: #666;
+}
+
+.btn-primary {
+    background-color: #4CAF50;
+    border-color: #4CAF50;
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-weight: 500;
+    transition: all 0.3s ease;
+}
+
+.btn-primary:hover {
+    background-color: #388E3C;
+    border-color: #388E3C;
+    box-shadow: 0 4px 8px rgba(76, 175, 80, 0.3);
+}
+
+.btn-warning {
+    background-color: #FF8C00;
+    border-color: #FF8C00;
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-weight: 500;
+    color: white;
+    transition: all 0.3s ease;
+}
+
+.btn-warning:hover {
+    background-color: #E67E00;
+    border-color: #E67E00;
+    box-shadow: 0 4px 8px rgba(255, 140, 0, 0.3);
+}
+
+.btn-outline-danger {
+    border: 1px solid #dc3545;
+    color: #dc3545;
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-weight: 500;
+    transition: all 0.3s ease;
+}
+
+.btn-outline-danger:hover {
+    background-color: #dc3545;
+    color: white;
+    box-shadow: 0 4px 8px rgba(220, 53, 69, 0.3);
+}
+
+.alert {
+    border: none;
+    border-radius: 8px;
+    padding: 15px 20px;
+    margin-bottom: 20px;
+    font-size: 0.95rem;
+}
+
+.alert-success {
+    background-color: #d4edda;
+    color: #155724;
+    border-left: 4px solid #28a745;
+}
+
+.alert-danger {
+    background-color: #f8d7da;
+    color: #721c24;
+    border-left: 4px solid #dc3545;
+}
+
+.small.text-muted {
+    color: #888 !important;
+    font-size: 0.85rem;
+}
+
+.row.g-4 > .col-md-6 {
+    display: flex;
+    flex-direction: column;
+}
+
+.row.g-4 > .col-md-6 .card {
+    flex: 1;
+}
+
+@media (max-width: 768px) {
+    .main-content {
+        margin-left: 0;
+        padding-top: 60px;
+    }
+    
+    .content-area {
+        padding: 15px;
+    }
+    
+    .top-bar {
+        padding: 15px;
+    }
+}
+</style>
+
+<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+<script src="../assets/js/mobile-menu.js"></script>
+<script src="../assets/js/script.js"></script>
+</body>
+</html>

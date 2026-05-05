@@ -1,0 +1,626 @@
+<?php
+
+require_once '../config/database.php';
+requireStudent();
+
+// Initialize cart if not exists
+if (!isset($_SESSION['cart'])) {
+    $_SESSION['cart'] = [];
+}
+
+// Handle Add to Cart
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_to_cart'])) {
+    $product_id = clean($_POST['product_id']);
+    $quantity = intval($_POST['quantity']);
+    $variants = isset($_POST['variants']) ? $_POST['variants'] : [];
+    $variant_price = isset($_POST['selected_variant_price']) ? floatval($_POST['selected_variant_price']) : 0;
+    
+    // Check if product exists and is available
+    $query = "SELECT * FROM products WHERE product_id = $product_id AND status = 'available'";
+    $result = mysqli_query($conn, $query);
+    
+    if ($result && mysqli_num_rows($result) > 0) {
+        $product = mysqli_fetch_assoc($result);
+        $valid = true;
+        
+        // If product has variants, validate them
+        $variants_check = mysqli_query($conn, "SELECT COUNT(DISTINCT variant_type) as variant_count FROM product_variants WHERE product_id = $product_id");
+        $variant_count = mysqli_fetch_assoc($variants_check)['variant_count'];
+        
+        if ($variant_count > 0) {
+            // Verify all variants are selected and valid
+            if (count($variants) != $variant_count) {
+                $error = "Please select all variants.";
+                $valid = false;
+            } else {
+                // Check stock for the specific variant combination (skip if preorder)
+                foreach ($variants as $type => $value) {
+                    $type = mysqli_real_escape_string($conn, $type);
+                    $value = mysqli_real_escape_string($conn, $value);
+                    $stock_check = mysqli_query($conn, "SELECT stock_quantity FROM product_variants 
+                                                      WHERE product_id = $product_id 
+                                                      AND variant_type = '$type' 
+                                                      AND variant_value = '$value'");
+                    if ($stock_row = mysqli_fetch_assoc($stock_check)) {
+                        if (empty($product['is_preorder']) || $product['is_preorder'] == 0) {
+                            if ($stock_row['stock_quantity'] < $quantity) {
+                                $error = "Insufficient stock for selected variant.";
+                                $valid = false;
+                                break;
+                            }
+                        }
+                    } else {
+                        $error = "Invalid variant selected.";
+                        $valid = false;
+                        break;
+                    }
+                }
+            }
+        } else {
+            // No variants, check base stock (skip if preorder)
+            if ($product['is_preorder'] == 1 || $product['total_stock'] > 0) {
+    echo '<button class="add-to-cart-btn">Add to Cart</button>';
+} else {
+    echo '<button disabled>Out of Stock</button>';
+}
+        }
+        
+        if ($valid) {
+            // Generate a unique key for the cart item that includes variants
+            $cart_key = $product_id;
+            if (!empty($variants)) {
+                ksort($variants); // Sort variant types to ensure consistent keys
+                $variant_string = '';
+                foreach ($variants as $type => $value) {
+                    $variant_string .= "_{$type}-{$value}";
+                }
+                $cart_key .= $variant_string;
+            }
+            
+            if (isset($_SESSION['cart'][$cart_key])) {
+                $_SESSION['cart'][$cart_key]['quantity'] += $quantity;
+            } else {
+                $_SESSION['cart'][$cart_key] = [
+                    'product_id' => $product_id,
+                    'product_name' => $product['product_name'],
+                    'price' => $variant_price > 0 ? $variant_price : $product['price'],
+                    'quantity' => $quantity,
+                    'image_path' => $product['image_path'] ?? $product['image_url'] ?? null,
+                    'image_url' => $product['image_url'] ?? null,
+                    'variants' => $variants,
+                    'requires_down_payment' => $product['requires_down_payment']
+                ];
+            }
+            $success = "Product added to cart!";
+        }
+    } else {
+        $error = "Product not found or unavailable.";
+    }
+}
+
+// Get filter parameters
+$category_filter = isset($_GET['category']) ? clean($_GET['category']) : '';
+$search = isset($_GET['search']) ? clean($_GET['search']) : '';
+
+// Build query (prefix columns with table alias to avoid ambiguity when joining)
+$where_clauses = ["p.status = 'available'"];
+if ($category_filter) {
+    $where_clauses[] = "p.category = '$category_filter'";
+}
+if ($search) {
+    $where_clauses[] = "(p.product_name LIKE '%$search%' OR p.description LIKE '%$search%')";
+}
+
+$where_sql = 'WHERE ' . implode(' AND ', $where_clauses);
+
+$query = "SELECT p.*, 
+          MIN(v.price) as min_variant_price, 
+          MAX(v.price) as max_variant_price,
+          COUNT(v.variant_id) as variant_count,
+          COALESCE(SUM(v.stock_quantity), 0) as total_variant_stock 
+          FROM products p 
+          LEFT JOIN product_variants v ON p.product_id = v.product_id 
+          $where_sql
+          GROUP BY p.product_id 
+          ORDER BY p.product_name ASC";
+$products = mysqli_query($conn, $query);
+
+// Get categories
+$categories_query = "SELECT DISTINCT category FROM products WHERE category IS NOT NULL AND category != '' AND status = 'available'";
+$categories = mysqli_query($conn, $categories_query);
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shop Products - UniNeeds</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <link rel="stylesheet" href="../assets/css/style.css">
+    <link rel="stylesheet" href="../assets/css/mobile.css">
+</head>
+<body>
+    <?php include 'includes/sidebar.php'; ?>
+    
+    <div class="main-content">
+        <div class="top-bar">
+            <button class="btn btn-link d-md-none" id="sidebarToggle">
+                <i class="bi bi-list fs-3"></i>
+            </button>
+            <h2>Shop Products</h2>
+        </div>
+        
+        <div class="content-area">
+            <?php if (isset($success)): ?>
+                <div class="alert alert-success alert-dismissible fade show">
+                    <i class="bi bi-check-circle me-2"></i><?php echo $success; ?>
+                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                </div>
+            <?php endif; ?>
+            
+            <?php if (isset($error)): ?>
+                <div class="alert alert-danger alert-dismissible fade show">
+                    <i class="bi bi-exclamation-triangle me-2"></i><?php echo $error; ?>
+                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                </div>
+            <?php endif; ?>
+            
+            <!-- Filter Bar -->
+            <div class="filter-bar">
+                <form method="GET" class="row g-3 align-items-end">
+                    <div class="col-md-5">
+                        <label class="form-label">Search Products</label>
+                        <input type="text" class="form-control" name="search" placeholder="Search by name or description" value="<?php echo htmlspecialchars($search); ?>">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">Category</label>
+                        <select class="form-select" name="category">
+                            <option value="">All Categories</option>
+                            <?php while ($cat = mysqli_fetch_assoc($categories)): ?>
+                                <option value="<?php echo htmlspecialchars($cat['category']); ?>" <?php echo $category_filter === $cat['category'] ? 'selected' : ''; ?>>
+                                    <?php echo htmlspecialchars($cat['category']); ?>
+                                </option>
+                            <?php endwhile; ?>
+                        </select>
+                    </div>
+                    <div class="col-md-2">
+                        <button type="submit" class="btn btn-primary w-100">
+                            <i class="bi bi-search me-2"></i>Filter
+                        </button>
+                    </div>
+                    <div class="col-md-2">
+                        <a href="products.php" class="btn btn-outline-secondary w-100">
+                            <i class="bi bi-x-circle me-2"></i>Clear
+                        </a>
+                    </div>
+                </form>
+            </div>
+            
+            <!-- Products Grid -->
+            <div class="row g-4">
+                <?php if (mysqli_num_rows($products) > 0): ?>
+                    <?php while ($product = mysqli_fetch_assoc($products)): ?>
+                        <div class="col-md-3 d-flex">
+                            <div class="product-card w-100 d-flex flex-column" data-category="<?php echo htmlspecialchars($product['category']); ?>">
+                                <?php
+                                    $imgSrc = '';
+                                    if (!empty($product['image_path'])) $imgSrc = $product['image_path'];
+                                    elseif (!empty($product['image_url'])) $imgSrc = $product['image_url'];
+
+                                    $appBase = rtrim(dirname($_SERVER['SCRIPT_NAME'], 2), '/');
+                                    $imgFound = false;
+                                    $imgSrcNorm = '';
+
+                                    if ($imgSrc) {
+                                        // External URL or protocol-relative
+                                        if (preg_match('/^(https?:)?\\/\\//i', $imgSrc)) {
+                                            $imgSrcNorm = $imgSrc;
+                                            $imgFound = true;
+                                        } else {
+                                            $rel = ltrim($imgSrc, '/.');
+                                            $candidate = ($appBase === '' ? '/' : $appBase . '/') . $rel;
+                                            if (substr($candidate, 0, 1) !== '/') $candidate = '/' . $candidate;
+
+                                            $filePath = rtrim($_SERVER['DOCUMENT_ROOT'], '/\\') . $candidate;
+                                            if (file_exists($filePath)) {
+                                                $imgSrcNorm = $candidate;
+                                                $imgFound = true;
+                                            } else {
+                                                // try placeholder (use existing avatar if we don't have a product placeholder)
+                                                $placeholder = ($appBase === '' ? '/assets/images/avatar.png' : $appBase . '/assets/images/avatar.png');
+                                                $placeholderFile = rtrim($_SERVER['DOCUMENT_ROOT'], '/\\') . $placeholder;
+                                                if (file_exists($placeholderFile)) {
+                                                    $imgSrcNorm = $placeholder;
+                                                    $imgFound = true;
+                                                } else {
+                                                    $imgFound = false;
+                                                }
+                                            }
+                                        }
+                                    }
+                                ?>
+
+                                <?php if ($imgFound): ?>
+                                    <img src="<?php echo htmlspecialchars($imgSrcNorm); ?>" 
+                                         alt="<?php echo htmlspecialchars($product['product_name']); ?>" 
+                                         class="product-image"
+                                         onerror="this.onerror=null; this.src='<?php echo htmlspecialchars(($appBase === '' ? '' : $appBase) . '/assets/images/product-placeholder.jpg'); ?>';">
+                                <?php else: ?>
+                                    <div class="product-image d-flex align-items-center justify-content-center">
+                                        <i class="bi bi-image text-muted" style="font-size: 3rem;"></i>
+                                    </div>
+                                <?php endif; ?>
+                                
+                                <div class="product-details flex-grow-1 d-flex flex-column">
+                                    <span class="badge bg-primary mb-3 align-self-start"><?php echo htmlspecialchars($product['category']); ?></span>
+                                    <h6 class="product-title fw-bold mb-2" style="font-size: 1.1rem; color: #2c3e50;"><?php echo htmlspecialchars($product['product_name']); ?></h6>
+                                    <p class="text-muted small mb-3" style="flex-grow: 1;"><?php echo htmlspecialchars(substr($product['description'], 0, 80)); ?><?php echo strlen($product['description']) > 80 ? '...' : ''; ?></p>
+                                    
+                                    <div class="d-flex justify-content-between align-items-center mb-3 pb-3 border-bottom">
+                                        <div class="product-price">
+                                            <span class="fw-bold" style="font-size: 1.25rem; color: #27ae60;">
+                                            <?php if ($product['variant_count'] > 0): ?>
+                                                <?php if ($product['min_variant_price'] == $product['max_variant_price']): ?>
+                                                    <?php echo formatCurrency($product['min_variant_price']); ?>
+                                                <?php else: ?>
+                                                    <?php echo formatCurrency($product['min_variant_price']) . ' - ' . formatCurrency($product['max_variant_price']); ?>
+                                                <?php endif; ?>
+                                            <?php else: ?>
+                                                <?php echo formatCurrency($product['price']); ?>
+                                            <?php endif; ?>
+                                            </span>
+                                        </div>
+                                        <small class="text-muted" style="font-size: 0.9rem;">
+                                            <i class="bi bi-box-seam me-1"></i>
+                                            <?php 
+                                            $stock = $product['variant_count'] > 0 ? $product['total_variant_stock'] : $product['stock_quantity'];
+                                            if (!empty($product['is_preorder']) && $product['is_preorder'] == 1):
+                                            ?>
+                                                <span class="text-info">Pre-order / Made-to-order</span>
+                                            <?php else: ?>
+                                                <?php if ($stock > 0): ?>
+                                                    Stock: <?php echo $stock; ?>
+                                                <?php else: ?>
+                                                    <span class="text-danger">Out of Stock</span>
+                                                <?php endif; ?>
+                                            <?php endif; ?>
+                                        </small>
+                                    </div>
+                                    
+                                    <div class="mt-auto">
+                                    <?php 
+                                    $stock = $product['variant_count'] > 0 ? $product['total_variant_stock'] : $product['stock_quantity'];
+                                    if (!empty($product['is_preorder']) && $product['is_preorder'] == 1): ?>
+                                        <button id="addToCartBtn<?php echo $product['product_id']; ?>" class="btn btn-primary w-100" style="font-weight: 600; padding: 0.65rem;" data-bs-toggle="modal" data-bs-target="#addModal<?php echo $product['product_id']; ?>">
+                                            <i class="bi bi-cart-plus me-2"></i>Add to Cart
+                                        </button>
+                                    <?php else: ?>
+                                        <?php if ($stock > 0): ?>
+                                            <button id="addToCartBtn<?php echo $product['product_id']; ?>" class="btn btn-primary w-100" style="font-weight: 600; padding: 0.65rem;" data-bs-toggle="modal" data-bs-target="#addModal<?php echo $product['product_id']; ?>">
+                                                <i class="bi bi-cart-plus me-2"></i>Add to Cart
+                                            </button>
+                                        <?php else: ?>
+                                            <button class="btn btn-secondary w-100" disabled style="padding: 0.65rem;">
+                                                Out of Stock
+                                            </button>
+                                        <?php endif; ?>
+                                    <?php endif; ?>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Add to Cart Modal -->
+                        <div class="modal fade" id="addModal<?php echo $product['product_id']; ?>" tabindex="-1">
+                            <div class="modal-dialog modal-xl">
+                                        <div class="modal-content" style="border: none; box-shadow: 0 5px 30px rgba(0,0,0,0.15);">
+                                            <form method="POST">
+                                                <div class="modal-header" style="border-bottom: 2px solid #f0f0f0; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
+                                                    <h5 class="modal-title fw-bold"><?php echo htmlspecialchars($product['product_name']); ?></h5>
+                                                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                                                </div>
+                                                <div class="modal-body" style="padding: 2rem;">
+                                                    <input type="hidden" name="product_id" value="<?php echo $product['product_id']; ?>">
+
+                                                    <div class="mb-4 text-center">
+                                                        <?php
+                                                            $modalImg = '';
+                                                            if (!empty($product['image_path'])) $modalImg = $product['image_path'];
+                                                            elseif (!empty($product['image_url'])) $modalImg = $product['image_url'];
+                                                        ?>
+                                                        <?php
+                                                            $modalImgNorm = '';
+                                                            $modalFound = false;
+                                                            $appBase = rtrim(dirname($_SERVER['SCRIPT_NAME'], 2), '/');
+                                                            if (!empty($product['image_path'])) $modalImg = $product['image_path'];
+                                                            elseif (!empty($product['image_url'])) $modalImg = $product['image_url'];
+
+                                                            if (!empty($modalImg)) {
+                                                                if (preg_match('/^(https?:)?\\/\\//i', $modalImg)) {
+                                                                    $modalImgNorm = $modalImg;
+                                                                    $modalFound = true;
+                                                                } else {
+                                                                    $rel = ltrim($modalImg, '/.');
+                                                                    $candidate = ($appBase === '' ? '/' : $appBase . '/') . $rel;
+                                                                    if (substr($candidate, 0, 1) !== '/') $candidate = '/' . $candidate;
+
+                                                                    $filePath = rtrim($_SERVER['DOCUMENT_ROOT'], '/\\') . $candidate;
+                                                                    if (file_exists($filePath)) {
+                                                                        $modalImgNorm = $candidate;
+                                                                        $modalFound = true;
+                                                                    } else {
+                                                                        $placeholder = ($appBase === '' ? '/assets/images/avatar.png' : $appBase . '/assets/images/avatar.png');
+                                                                        if (file_exists(rtrim($_SERVER['DOCUMENT_ROOT'], '/\\') . $placeholder)) {
+                                                                            $modalImgNorm = $placeholder;
+                                                                            $modalFound = true;
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                            ?>
+                                                            <?php if ($modalFound): ?>
+                                                            <div class="modal-image-wrapper">
+                                                                <img src="<?php echo htmlspecialchars($modalImgNorm); ?>" alt="<?php echo htmlspecialchars($product['product_name']); ?>" class="modal-product-image" onerror="this.onerror=null; this.src='<?php echo htmlspecialchars(($appBase === '' ? '' : $appBase) . '/assets/images/avatar.png'); ?>';">
+                                                            </div>
+                                                            <?php else: ?>
+                                                                <div class="product-image d-flex align-items-center justify-content-center" style="height: 300px;">
+                                                                    <i class="bi bi-image text-muted" style="font-size: 3rem;"></i>
+                                                                </div>
+                                                            <?php endif; ?>
+                                                    </div>
+
+                                                    <div class="mb-4 pb-3 border-bottom">
+                                                        <div class="d-flex justify-content-between align-items-start mb-2">
+                                                            <div>
+                                                                <span class="badge bg-primary" style="font-size: 0.85rem; padding: 0.5rem 0.75rem;"><?php echo htmlspecialchars($product['category']); ?></span>
+                                                                <h5 class="mt-2 mb-1 fw-bold" style="color: #2c3e50;"><?php echo htmlspecialchars($product['product_name']); ?></h5>
+                                                            </div>
+                                                        </div>
+                                                        <p class="text-muted mb-2" style="line-height: 1.6;"><?php echo htmlspecialchars($product['description']); ?></p>
+                                                        <?php if (!empty($product['size_guide'])): ?>
+                                                        <div class="mb-3">
+                                                            <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#sizeGuideModal<?php echo $product['product_id']; ?>">
+                                                                <i class="bi bi-rulers me-1"></i>Size Guide
+                                                            </button>
+                                                        </div>
+                                                        <?php endif; ?>
+                                                        <?php
+                                                        // Fetch variants for this product
+                                                        $variants_query = "SELECT DISTINCT variant_type FROM product_variants WHERE product_id = " . $product['product_id'] . " ORDER BY variant_type";
+                                                        $variants_result = mysqli_query($conn, $variants_query);
+                                                        $has_variants = mysqli_num_rows($variants_result) > 0;
+                                                        ?>
+                                                        <?php if (!$has_variants): ?>
+                                                            <?php if (empty($product['is_preorder']) || $product['is_preorder'] == 0): ?>
+                                                            <p class="fw-bold mb-0" style="font-size: 1.3rem; color: #27ae60;">Base Price: <?php echo formatCurrency($product['price']); ?></p>
+                                                            <?php else: ?>
+                                                            <p class="mb-0"><span class="badge bg-info" style="font-size: 0.9rem; padding: 0.5rem 0.75rem;">Pre-order / Made-to-order</span></p>
+                                                            <?php endif; ?>
+                                                        <?php else: ?>
+                                                            <p class="mb-0"><span class="badge bg-info" style="font-size: 0.9rem; padding: 0.5rem 0.75rem;">Select variant to see price</span></p>
+                                                        <?php endif; ?>
+                                                    </div>
+
+                                                    <?php
+                                                    // Fetch variants for this product
+                                                    $variants_query = "SELECT DISTINCT variant_type FROM product_variants WHERE product_id = " . $product['product_id'] . " ORDER BY variant_type";
+                                                    $variants_result = mysqli_query($conn, $variants_query);
+                                                    $has_variants = mysqli_num_rows($variants_result) > 0;
+                                                    ?>
+
+                                                    <div class="variant-options mb-4 text-start">
+                                                        <?php
+                                                        while ($variant_type = mysqli_fetch_assoc($variants_result)) {
+                                                            $type = $variant_type['variant_type'];
+                                                            echo '<div class="mb-3">';
+                                                            echo '<label class="form-label fw-bold mb-2" style="font-size: 0.95rem; color: #2c3e50; display: block;">' . htmlspecialchars(ucfirst($type)) . ' <span style="color: #e74c3c;">*</span></label>';
+                                                            echo '<select class="form-select variant-select" name="variants[' . htmlspecialchars($type) . ']" data-product-id="' . $product['product_id'] . '" required style="padding: 0.75rem 1rem; font-size: 0.95rem; border: 2px solid #e0e0e0; border-radius: 8px; background-color: #fff; color: #2c3e50; font-weight: 500; transition: all 0.3s ease;">';
+                                                            echo '<option value="" style="color: #999; font-weight: 400;">Select ' . htmlspecialchars(ucfirst($type)) . '</option>';
+
+                                                            // Fetch values for this variant type
+                                                            $values_query = "SELECT * FROM product_variants WHERE product_id = " . $product['product_id'] . " AND variant_type = '" . mysqli_real_escape_string($conn, $type) . "'";
+                                                            $values_result = mysqli_query($conn, $values_query);
+
+                                                            while ($value = mysqli_fetch_assoc($values_result)) {
+                                                                // For pre-order products, don't mark variants as out of stock
+                                                                $isPreorder = !empty($product['is_preorder']) && $product['is_preorder'] == 1;
+                                                                $isOOSVariant = $value['stock_quantity'] <= 0 && !$isPreorder;
+                                                                $optionStyle = $isOOSVariant ? 'opacity: 0.5; color: #999;' : 'color: #2c3e50;';
+                                                                $optionDisabled = $isOOSVariant ? 'disabled' : '';
+                                                                $stockText = $isOOSVariant ? ' (Out of Stock)' : '';
+                                                                echo '<option value="' . htmlspecialchars($value['variant_value']) . '" 
+                                                                        data-price="' . $value['price'] . '"
+                                                                        data-stock="' . $value['stock_quantity'] . '"
+                                                                        ' . $optionDisabled . '
+                                                                        style="padding: 0.75rem; background-color: #fff; ' . $optionStyle . ' font-weight: 500;">
+                                                                        ' . htmlspecialchars($value['variant_value']) . ' - ' . formatCurrency($value['price']) . $stockText . '
+                                                                    </option>';
+                                                            }
+
+                                                            echo '</select>';
+                                                            echo '</div>';
+                                                        }
+                                                        ?>
+                                                    </div>
+
+                                                    <div class="mb-4 pb-3 border-bottom">
+                                                        <label class="form-label fw-bold mb-3" style="font-size: 1rem; color: #2c3e50;">Quantity</label>
+                                                        <div class="d-flex align-items-center gap-3">
+                                                            <button type="button" class="btn btn-outline-primary qty-decrease" style="width: 45px; height: 45px; border-radius: 8px; font-size: 1.3rem; font-weight: bold; padding: 0; display: flex; align-items: center; justify-content: center;">
+                                                                <i class="bi bi-dash"></i>
+                                                            </button>
+                                                            <input type="number" class="form-control text-center" name="quantity" value="1" 
+                                                                <?php if (!empty($product['is_preorder']) && $product['is_preorder'] == 1): ?>
+                                                                id="quantityInput<?php echo $product['product_id']; ?>" style="width: 80px; height: 45px; font-size: 1.1rem; font-weight: 600; border-radius: 8px;" required
+                                                            <?php else: ?>
+                                                                min="1" max="<?php echo $has_variants ? 9999 : $product['stock_quantity']; ?>" 
+                                                                required
+                                                                <?php echo $has_variants ? 'disabled' : ''; ?>
+                                                                id="quantityInput<?php echo $product['product_id']; ?>" style="width: 80px; height: 45px; font-size: 1.1rem; font-weight: 600; border-radius: 8px;"
+                                                            <?php endif; ?>>
+                                                            <button type="button" class="btn btn-outline-primary qty-increase" style="width: 45px; height: 45px; border-radius: 8px; font-size: 1.3rem; font-weight: bold; padding: 0; display: flex; align-items: center; justify-content: center;">
+                                                                <i class="bi bi-plus"></i>
+                                                            </button>
+                                                        </div>
+                                                    </div>
+
+                                                    <div class="price-stock-info" style="background: #f8f9fa; border-radius: 10px; padding: 1.5rem; margin-bottom: 2rem; border-left: 4px solid #667eea;">
+                                                        <div class="row">
+                                                            <div class="col-md-6 mb-2">
+                                                                <small class="text-muted d-block" style="font-size: 0.85rem; margin-bottom: 0.25rem;">Price</small>
+                                                                <p class="mb-0" style="font-size: 1.2rem; font-weight: 600; color: #2c3e50;">
+                                                                    <span id="displayPrice<?php echo $product['product_id']; ?>">
+                                                                        <?php 
+                                                                        if ($has_variants) {
+                                                                            echo 'Select variants to see price';
+                                                                        } else {
+                                                                            if (empty($product['is_preorder']) || $product['is_preorder'] == 0) {
+                                                                                echo formatCurrency($product['price']);
+                                                                            } else {
+                                                                                echo 'Pre-order pricing';
+                                                                            }
+                                                                        }
+                                                                        ?>
+                                                                    </span>
+                                                                </p>
+                                                            </div>
+                                                            <?php if (empty($product['is_preorder']) || $product['is_preorder'] == 0): ?>
+                                                            <div class="col-md-6 mb-2">
+                                                                <small class="text-muted d-block" style="font-size: 0.85rem; margin-bottom: 0.25rem;">Available Stock</small>
+                                                                <p class="mb-0" style="font-size: 1.2rem; font-weight: 600; color: #27ae60;">
+                                                                    <span id="displayStock<?php echo $product['product_id']; ?>">
+                                                                        <?php echo $has_variants ? 'Select variants to see stock' : $product['stock_quantity'] . ' units'; ?>
+                                                                    </span>
+                                                                </p>
+                                                            </div>
+                                                            <?php endif; ?>
+                                                        </div>
+                                                        <div class="border-top mt-2 pt-2">
+                                                            <small class="text-muted d-block" style="font-size: 0.85rem; margin-bottom: 0.25rem;">Total Price</small>
+                                                            <p class="mb-0" style="font-size: 1.35rem; font-weight: 700; color: #27ae60;">
+                                                                <span id="displayTotal<?php echo $product['product_id']; ?>">
+                                                                    <?php echo $has_variants ? '₱0.00' : formatCurrency($product['price']); ?>
+                                                                </span>
+                                                            </p>
+                                                        </div>
+                                                    </div>
+
+                                                    <input type="hidden" name="selected_variant_price" id="variantPrice<?php echo $product['product_id']; ?>" value="<?php echo $has_variants ? '' : $product['price']; ?>">
+                                                    <input type="hidden" name="selected_variant_id" id="variantId<?php echo $product['product_id']; ?>" value="">
+                                                </div>
+                                                <div class="modal-footer" style="border-top: 2px solid #f0f0f0; padding: 1.5rem 2rem; background: #f8f9fa; gap: 1rem;">
+                                                    <button type="button" class="btn modal-btn-cancel" data-bs-dismiss="modal">
+                                                        <i class="bi bi-x-lg me-2"></i>Cancel
+                                                    </button>
+                                                    <button id="modalAddBtn<?php echo $product['product_id']; ?>" type="submit" name="add_to_cart" class="btn modal-btn-add">
+                                                        <i class="bi bi-cart-plus me-2"></i>Add to Cart
+                                                    </button>
+                                                </div>
+                                            </form>
+                                        </div>
+                            </div>
+                        </div>
+                    <?php if (!empty($product['size_guide'])): ?>
+                    <div class="modal fade" id="sizeGuideModal<?php echo $product['product_id']; ?>" tabindex="-1">
+                        <div class="modal-dialog modal-dialog-centered modal-lg">
+                            <div class="modal-content">
+                                <div class="modal-header">
+                                    <h5 class="modal-title">Size Guide</h5>
+                                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                                </div>
+                                <div class="modal-body">
+                        <?php
+                        // Parse size guide CSV-like content and render as table
+                        $sg_raw = trim($product['size_guide']);
+                        if (!empty($sg_raw)) {
+                            $lines = preg_split('/\r\n|\r|\n/', $sg_raw);
+                            $rows = [];
+                            foreach ($lines as $line) {
+                                $line = trim($line);
+                                if ($line === '') continue;
+                                $cells = array_map('trim', explode(',', $line));
+                                if (count($cells) > 0) {
+                                    $rows[] = $cells;
+                                }
+                            }
+                        }
+
+                        if (!empty($rows)) {
+                            echo '<div class="table-responsive"><table class="table table-bordered table-sm mb-0">';
+                            // Header row
+                            echo '<thead class="table-light"><tr>';
+                            foreach ($rows[0] as $headerCell) {
+                                echo '<th>' . htmlspecialchars($headerCell) . '</th>';
+                            }
+                            echo '</tr></thead>';
+
+                            if (count($rows) > 1) {
+                                echo '<tbody>';
+                                for ($i = 1; $i < count($rows); $i++) {
+                                    echo '<tr>';
+                                    foreach ($rows[$i] as $cell) {
+                                        echo '<td>' . htmlspecialchars($cell) . '</td>';
+                                    }
+                                    echo '</tr>';
+                                }
+                                echo '</tbody>';
+                            }
+                            echo '</table></div>';
+                        } else {
+                            echo '<p class="text-muted">No size guide available.</p>';
+                        }
+                        ?>
+                    </div>
+                                <div class="modal-footer">
+                                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <?php endif; ?>
+                    <?php endwhile; ?>
+                <?php else: ?>
+                    <div class="col-12">
+                        <div class="empty-state">
+                            <i class="bi bi-search"></i>
+                            <h5>No Products Found</h5>
+                            <p>Try adjusting your search or filter criteria.</p>
+                        </div>
+                    </div>
+                <?php endif; ?>
+            </div>
+        </div>
+    </div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="../assets/js/script.js"></script>
+    <script src="../assets/js/product-variants-shop.js"></script>
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        // Add hover and click zoom behavior for modal images
+        document.querySelectorAll('.modal-image-wrapper').forEach(function(wrapper) {
+            var img = wrapper.querySelector('.modal-product-image');
+            if (!img) return;
+
+            wrapper.addEventListener('mouseenter', function() {
+                img.classList.add('zoomed');
+                wrapper.classList.add('zoomed');
+            });
+            wrapper.addEventListener('mouseleave', function() {
+                img.classList.remove('zoomed');
+                wrapper.classList.remove('zoomed');
+            });
+
+            // For touch devices, toggle zoom on tap
+            wrapper.addEventListener('click', function(e) {
+                if (window.matchMedia('(hover: none)').matches) {
+                    img.classList.toggle('zoomed');
+                    wrapper.classList.toggle('zoomed');
+                }
+            });
+        });
+    });
+    </script>
+</body>
+</html>
