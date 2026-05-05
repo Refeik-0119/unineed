@@ -1,0 +1,6 @@
+student_id,full_name,email,phone,course,year_level,section
+20240001,Justine Martin,justine.martin@example.com,09123456789,BSIS,1,A
+20240002,Juan Santos,juan.santos@example.com,09234567890,BSOM,1,B
+20240003,Maria Cruz,maria.cruz@example.com,09345678901,BSAIS,2,A
+20240004,Carlos Reyes,carlos.reyes@example.com,09456789012,BSIS,2,C
+20240005,Ana Gomez,ana.gomez@example.com,09567890123,BSOM,3,B
